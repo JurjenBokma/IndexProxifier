@@ -2,33 +2,52 @@
 
 ## Purpose of a Transparent Proxy
 
-Occasionally we need to provide a class with an index operator that cannot
-return a reference. This happens e.g. when using the object as an lvalue
-requires different behavior from using it as an rvalue, or when there is no
-referenceable content in the first place. (Examples further down).
-We might then create some Proxy type and return that, but writing one is
-somewhat error-prone.
+Usually, overloaded index operators return references:
+
+    // Return reference to some string contained in MyStrings object.
+    std::string &MyStrings::operator[](std::size_t idx);
+
+Occasionally however, we need to provide a class with an index operator that
+cannot return a reference. This happens e.g. when there is nothing to
+reference in the first place, or when behavior of the return value must change
+depending on whether the index operator is used as an rvalue or as an lvalue.
+(Examples further down).
+
+We then have to create some nested Proxy type and return that, but writing one
+is repetitive work, and somewhat error-prone.
+
+## Purpose of the IndexProxifier
+
+The `IndexProxifier` CRTP template takes a derived class as its template type
+parameter, and creates for that derived class the nested `LRProxy` class, as
+well as the index operator(s) that return an LRProxy.
 
 ## Use
 
-    class myclass : protected IndexProxifier < myclass >
-	  {...};
+    class MyClass : protected IndexProxifier < MyClass >
+    {...};
 
-    class myclass : protected IndexProxifier < myclass,
+or
+
+    Class MyClass : protected IndexProxifier < MyClass,
                     my_keychoice_policy >
-	  {...};
+    {...};
 
-    The IndexProxifier uses C++20 concepts, so -std=c++20 is required.
+The IndexProxifier uses C++20 concepts, so -std=c++20 is required.
 
 ## Configuration
-The class `myclass` must do the following:
+In order for IndexProxifier to work, the derived class (above: `MyClass`) must
+do the following:
 
 1. Provide a (private) function
 
        [constexpr] ret_type proxy_return_action(Key key) const;
 
    The resulting ret_type will be returned by the index operator when
-   it is on the right hand side of an assignment.
+   it is on the right hand side of an assignment:
+   
+       MyClass mc;
+	   ret_type const value = mc[some_key];
 
 2. Provide a (private) function
 
@@ -36,7 +55,10 @@ The class `myclass` must do the following:
 
    This will be called when the index operator is used on the left hand
    side of an assignment. The return type some_type will be returned from the
-   assignment operator on an LRProxy.
+   assignment operator on an LRProxy:
+   
+       MyClass mc;
+	   mc[some_key] = mc[some_other_key] = some_value;
 
 3. Declare
 
@@ -44,13 +66,14 @@ The class `myclass` must do the following:
 
    so the proxifier will be allowed to call the above two functions.
 
-4. Make the injected index operator(s) public, if desired:
+4. Make the generated index operator(s) public, if desired:
 
        public:
        using IndexProxifier<myclass>::operator[];
 
 ## What it does
-The template IndexProxifier uses CRTP to provide its template parameter with:
+The template IndexProxifier uses the CRTP to provide its template parameter
+with:
 
        LRProxy<Key, Derived> operator[](Key &&);
 
@@ -94,7 +117,7 @@ IndexProxifier creates this LRProxy based on the `proxy_return_action` and
 ## Notes
 IndexProxifier tries hard to Just Work.
 
-A hand-crafted Proxy might create an undesirable back door:
+1. A hand-crafted Proxy might create an undesirable back door:
 
     struct myclass::proxy
     {
@@ -106,7 +129,7 @@ A hand-crafted Proxy might create an undesirable back door:
 IndexProxifier prevents this by transferring the cv- and rvalue-reference
 qualifiers of the indexed object onto the owner inside the LRProxy.
 
-Often, a hand-crafted myclass' operator[](...) const can return by value.
+2. Often, a hand-crafted myclass' operator[](...) const can return by value.
 IndexProxifier instead returns an LRProxy even here:
 
     LRProxy operator[](keytype key) const;
@@ -131,7 +154,7 @@ It does this for multiple reasons:
       return IndexProxifier<myclass>::operator[](key);
   }
 
-The LRProxy deletes its copy constructor to prevent dangerous constructions
+3. The LRProxy deletes its copy constructor to prevent dangerous constructions
 like:
 
     auto cpy = bitset{}[2];
@@ -148,7 +171,7 @@ and like:
 Both are dangerous because binding a return value to a class-scope reference
 does not extend the lifetime of the object.
 
-For the same reason, storing the `key` by value is to be preferred over storing
+4. For the same reason, storing the `key` by value is to be preferred over storing
 it by reference. Yet if the key is an object, which may be expensive to copy,
 or if `proxy_accept_action` or `proxy_return`_action take the key by non-const
 reference, LRProxy must store it by reference. The user can overide this
@@ -157,7 +180,7 @@ implements a key choice policy class. Such a non-default policy class can
 start out as a copy of the default `PreferValuePreferConst`, which is
 commented to explain.
 
-To prevent the idiom:
+5. To prevent the idiom:
 
     auto const &lref = bs[3]; // Bad: dangling danger.
 
@@ -199,6 +222,7 @@ an index operator that allows getting/setting individual bits.
 
     private:
 
+                            // Let IndexProxifier access private functions.
         friend IndexProxifier<EightBits>;
 
         bool proxy_return_action(int key) const;
@@ -207,12 +231,14 @@ an index operator that allows getting/setting individual bits.
         ... all other member functions left out ...
     };
 
+    // When used as rvalue, convert to bool.
     inline bool EightBits::proxy_return_action(int key) const
     {
         bool retval = (d_data & bitmask(key)) != 0;
         return retval;
     }
 
+    // When used as lvalue, use overloaded assignment to raise/lower one bit.
     inline bool EightBits::proxy_accept_action(int key, bool value)
     {
         data_t mask = bitmask(key);
